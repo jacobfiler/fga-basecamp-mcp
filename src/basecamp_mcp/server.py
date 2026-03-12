@@ -81,10 +81,11 @@ def _summarize_message(m: dict) -> dict:
 
 
 def _summarize_todolist(t: dict) -> dict:
+    desc = _strip_html(t.get("description", ""))
     return {
         "id": t["id"],
         "name": t.get("name", t.get("title", "")),
-        "description": t.get("description", ""),
+        "description": desc[:200] if desc else "",
         "completed": t.get("completed", False),
         "completed_ratio": t.get("completed_ratio", ""),
         "comments_count": t.get("comments_count", 0),
@@ -112,7 +113,6 @@ def _summarize_person(p: dict) -> dict:
         "email_address": p.get("email_address", ""),
         "title": p.get("title", ""),
         "admin": p.get("admin", False),
-        "avatar_url": p.get("avatar_url", ""),
     }
 
 
@@ -127,10 +127,18 @@ def _summarize_document(d: dict) -> dict:
     }
 
 
+def _strip_html(html: str) -> str:
+    """Strip HTML tags and collapse whitespace."""
+    import re
+
+    text = re.sub(r"<[^>]+>", " ", html)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _summarize_comment(c: dict) -> dict:
     return {
         "id": c["id"],
-        "content": c.get("content", ""),
+        "content": _strip_html(c.get("content", "")),
         "creator": c.get("creator", {}).get("name", ""),
         "created_at": c.get("created_at", ""),
     }
@@ -186,7 +194,9 @@ def get_project(project_id: int | None = None, name: str | None = None) -> dict 
 
 @mcp.tool()
 def list_messages(
-    project_id: int, message_board_id: int | None = None
+    project_id: int,
+    message_board_id: int | None = None,
+    limit: int = 50,
 ) -> list[dict] | str:
     """List messages on a project's message board.
 
@@ -195,6 +205,7 @@ def list_messages(
     Args:
         project_id: The project ID
         message_board_id: The message board ID (auto-discovered if omitted)
+        limit: Maximum number of messages to return (default 50)
     """
     client = _get_client()
 
@@ -205,7 +216,7 @@ def list_messages(
         message_board_id = tool["id"]
 
     messages = client.list_messages(project_id, message_board_id)
-    return [_summarize_message(m) for m in messages]
+    return [_summarize_message(m) for m in messages[:limit]]
 
 
 @mcp.tool()
@@ -224,7 +235,7 @@ def read_message(project_id: int, message_id: int) -> dict | str:
 
     comments = client.get_comments(project_id, message_id)
     result = _summarize_message(message)
-    result["content"] = message.get("content", "")
+    result["content"] = _strip_html(message.get("content", ""))
     result["comments"] = [_summarize_comment(c) for c in comments]
     return result
 
@@ -256,6 +267,7 @@ def list_todos(
     project_id: int,
     todolist_id: int,
     completed: bool = False,
+    limit: int = 50,
 ) -> list[dict]:
     """List todos in a todolist.
 
@@ -263,10 +275,11 @@ def list_todos(
         project_id: The project ID
         todolist_id: The todolist ID
         completed: If True, show completed todos. Default: False (pending only)
+        limit: Maximum number of todos to return (default 50)
     """
     client = _get_client()
     todos = client.list_todos(project_id, todolist_id, completed=completed)
-    return [_summarize_todo(t) for t in todos]
+    return [_summarize_todo(t) for t in todos[:limit]]
 
 
 @mcp.tool()
@@ -285,7 +298,7 @@ def read_todo(project_id: int, todo_id: int) -> dict | str:
 
     comments = client.get_comments(project_id, todo_id)
     result = _summarize_todo(todo)
-    result["description"] = todo.get("description", "")
+    result["description"] = _strip_html(todo.get("description", ""))
     result["created_at"] = todo.get("created_at", "")
     result["comments"] = [_summarize_comment(c) for c in comments]
     return result
@@ -336,7 +349,7 @@ def read_document(project_id: int, document_id: int) -> dict | str:
         return "Document not found."
 
     result = _summarize_document(doc)
-    result["content"] = doc.get("content", "")
+    result["content"] = _strip_html(doc.get("content", ""))
     return result
 
 
@@ -420,7 +433,7 @@ def search_project(project_id: int, keywords: str) -> dict[str, list[dict]] | st
 
 
 @mcp.tool()
-def search_all_projects(keywords: str) -> dict[str, list[dict]]:
+def search_all_projects(keywords: str, max_results: int = 15) -> dict[str, list[dict]]:
     """Search across ALL projects for documents, messages, uploads, and todos.
 
     Use this when you don't know which project something is in. Searches every
@@ -428,9 +441,11 @@ def search_all_projects(keywords: str) -> dict[str, list[dict]]:
 
     Args:
         keywords: Space-separated keywords to match (e.g. "style guide")
+        max_results: Maximum results per type (default 15)
     """
     client = _get_client()
     projects = client.list_projects()
+    cap = min(max(max_results, 1), 30)
 
     combined: dict[str, list[dict]] = {
         "messages": [],
@@ -440,6 +455,10 @@ def search_all_projects(keywords: str) -> dict[str, list[dict]]:
     }
 
     for project in projects:
+        # Stop early if all categories are full
+        if all(len(combined[k]) >= cap for k in combined):
+            break
+
         raw = client.search_project(project["id"], keywords)
         if "error" in raw:
             continue
@@ -451,7 +470,7 @@ def search_all_projects(keywords: str) -> dict[str, list[dict]]:
 
     # Cap results
     for key in combined:
-        combined[key] = combined[key][:30]
+        combined[key] = combined[key][:cap]
 
     return combined
 
