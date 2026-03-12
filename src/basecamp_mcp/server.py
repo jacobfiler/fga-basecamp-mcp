@@ -1,6 +1,7 @@
 """MCP server with Basecamp tools."""
 
 import logging
+import re
 import sys
 
 from mcp.server.fastmcp import FastMCP
@@ -17,32 +18,38 @@ mcp = FastMCP(
 
 # Initialized lazily on first tool call
 _client: BasecampClient | None = None
-_doc_client: DocSearchClient | None = None
-_doc_client_checked = False
+_UNSET = object()
+_doc_client: DocSearchClient | None | object = _UNSET
+
+
+def _ensure_initialized() -> None:
+    """Load config once and initialize both clients."""
+    global _client, _doc_client
+    if _client is not None:
+        return
+    config = load_config()
+    if not config:
+        raise RuntimeError("Not configured. Run `basecamp-mcp auth` first.")
+    _client = BasecampClient(config)
+    if config.get("doc_search_url"):
+        _doc_client = DocSearchClient(
+            config["doc_search_url"], config.get("doc_search_token")
+        )
+        logger.info(f"Document search enabled: {config['doc_search_url']}")
+    else:
+        _doc_client = None
 
 
 def _get_client() -> BasecampClient:
-    global _client
-    if _client is None:
-        config = load_config()
-        if not config:
-            raise RuntimeError("Not configured. Run `basecamp-mcp auth` first.")
-        _client = BasecampClient(config)
+    _ensure_initialized()
+    assert _client is not None
     return _client
 
 
 def _get_doc_client() -> DocSearchClient | None:
     """Return the doc search client, or None if not configured."""
-    global _doc_client, _doc_client_checked
-    if not _doc_client_checked:
-        _doc_client_checked = True
-        config = load_config()
-        if config and config.get("doc_search_url"):
-            _doc_client = DocSearchClient(
-                config["doc_search_url"], config.get("doc_search_token")
-            )
-            logger.info(f"Document search enabled: {config['doc_search_url']}")
-    return _doc_client
+    _ensure_initialized()
+    return _doc_client if isinstance(_doc_client, DocSearchClient) else None
 
 
 def _doc_search_request(path: str, params: dict | None = None) -> dict:
@@ -129,7 +136,6 @@ def _summarize_document(d: dict) -> dict:
 
 def _strip_html(html: str) -> str:
     """Strip HTML tags and collapse whitespace."""
-    import re
 
     text = re.sub(r"<[^>]+>", " ", html)
     return re.sub(r"\s+", " ", text).strip()
@@ -142,6 +148,21 @@ def _summarize_comment(c: dict) -> dict:
         "creator": c.get("creator", {}).get("name", ""),
         "created_at": c.get("created_at", ""),
     }
+
+
+def _resolve_dock_id(
+    client: BasecampClient, project_id: int, tool_name: str, provided_id: int | None
+) -> tuple[int | None, str | None]:
+    """Resolve a dock tool ID, auto-discovering if not provided.
+
+    Returns (resolved_id, error_message). If error_message is set, resolved_id is None.
+    """
+    if provided_id:
+        return provided_id, None
+    tool = client.get_dock_tool(project_id, tool_name)
+    if not tool:
+        return None, f"No {tool_name} found for this project."
+    return tool["id"], None
 
 
 # ── Tools ────────────────────────────────────────────────────────
@@ -208,12 +229,11 @@ def list_messages(
         limit: Maximum number of messages to return (default 50)
     """
     client = _get_client()
-
-    if not message_board_id:
-        tool = client.get_dock_tool(project_id, "message_board")
-        if not tool:
-            return "No message board found for this project."
-        message_board_id = tool["id"]
+    message_board_id, err = _resolve_dock_id(
+        client, project_id, "message_board", message_board_id
+    )
+    if err:
+        return err
 
     messages = client.list_messages(project_id, message_board_id)
     return [_summarize_message(m) for m in messages[:limit]]
@@ -251,12 +271,9 @@ def list_todolists(project_id: int, todoset_id: int | None = None) -> list[dict]
         todoset_id: The todoset ID (auto-discovered if omitted)
     """
     client = _get_client()
-
-    if not todoset_id:
-        tool = client.get_dock_tool(project_id, "todoset")
-        if not tool:
-            return "No todoset found for this project."
-        todoset_id = tool["id"]
+    todoset_id, err = _resolve_dock_id(client, project_id, "todoset", todoset_id)
+    if err:
+        return err
 
     todolists = client.list_todolists(project_id, todoset_id)
     return [_summarize_todolist(t) for t in todolists]
@@ -323,12 +340,9 @@ def list_documents(project_id: int, vault_id: int | None = None) -> list[dict] |
         vault_id: The vault ID (auto-discovered if omitted)
     """
     client = _get_client()
-
-    if not vault_id:
-        tool = client.get_dock_tool(project_id, "vault")
-        if not tool:
-            return "No vault found for this project."
-        vault_id = tool["id"]
+    vault_id, err = _resolve_dock_id(client, project_id, "vault", vault_id)
+    if err:
+        return err
 
     docs = client.list_documents(project_id, vault_id)
     return [_summarize_document(d) for d in docs]
@@ -390,12 +404,9 @@ def browse_vault(project_id: int, vault_id: int | None = None) -> dict | str:
         vault_id: The vault/folder ID (auto-discovers root vault if omitted)
     """
     client = _get_client()
-
-    if not vault_id:
-        tool = client.get_dock_tool(project_id, "vault")
-        if not tool:
-            return "No vault found for this project."
-        vault_id = tool["id"]
+    vault_id, err = _resolve_dock_id(client, project_id, "vault", vault_id)
+    if err:
+        return err
 
     data = client.browse_vault(project_id, vault_id)
     return {
