@@ -23,11 +23,18 @@ src/basecamp_mcp/
 ## Entry Points
 
 - `basecamp-mcp` — runs MCP server (stdio transport)
-- `basecamp-mcp auth` — interactive OAuth setup
+- `basecamp-mcp auth` — interactive OAuth setup (optionally prompts for doc search at the end)
+- `basecamp-mcp connect-docs` — connect a document search API (standalone, for existing installs)
 
-## V1 Tools (Read-Only)
+## Tools
 
-list_projects, get_project, list_messages, read_message, list_todolists, list_todos, read_todo, list_people, list_documents, read_document
+**Basecamp API (always available):**
+list_projects, get_project, list_messages, read_message, list_todolists, list_todos, read_todo, list_people, list_documents, read_document, browse_vault, search_project, search_all_projects
+
+**Document Search (optional — requires `doc_search_url` in config):**
+search_document_content, document_stats
+
+Document search tools call an external API (e.g. socialbot) that indexes .docx content into PostgreSQL full-text search. The tools always register but return a helpful error if unconfigured.
 
 ## Development
 

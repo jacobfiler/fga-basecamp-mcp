@@ -7,7 +7,8 @@ import webbrowser
 
 import httpx
 
-from .config import save_config
+from . import USER_AGENT
+from .config import load_config, save_config, update_doc_search
 
 REDIRECT_URI = "http://localhost:8000/callback"
 AUTH_BASE = "https://launchpad.37signals.com"
@@ -194,6 +195,99 @@ def run_auth_flow() -> None:
     print()
     print("Basecamp tools are now available in Claude Desktop.")
     print("Restart Claude Desktop if it's currently running.")
+    print()
+
+    # Offer document search setup
+    _offer_doc_search_setup()
+
+
+def run_connect_docs() -> None:
+    """Standalone command to connect a document search API."""
+    config = load_config()
+    if not config:
+        print("Run `basecamp-mcp auth` first to set up Basecamp access.")
+        sys.exit(1)
+
+    print("=" * 60)
+    print("Basecamp MCP — Document Search Setup")
+    print("=" * 60)
+    print()
+    _prompt_doc_search()
+
+
+def _offer_doc_search_setup() -> None:
+    """Ask at end of auth flow whether to connect document search."""
+    print("-" * 60)
+    print("Optional: Connect a document search API")
+    print("-" * 60)
+    print()
+    print("If your organization has a document ingestion service")
+    print("(e.g. one that indexes .docx files from Basecamp),")
+    print("you can connect it now to enable full-text document search.")
+    print()
+
+    answer = input("Connect a document search API? (y/N): ").strip().lower()
+    if answer not in ("y", "yes"):
+        print("Skipped. You can add this later with `basecamp-mcp connect-docs`.")
+        return
+
+    print()
+    _prompt_doc_search()
+
+
+def _prompt_doc_search() -> None:
+    """Prompt for document search URL + token, validate, and save."""
+    print("Enter the URL of your document search API.")
+    print("This should be the base URL (e.g. https://your-app.ondigitalocean.app)")
+    print()
+
+    url = input("Document search API URL: ").strip()
+    if not url:
+        print("URL is required.")
+        sys.exit(1)
+
+    url = url.rstrip("/")
+
+    print()
+    print("If the API requires authentication, enter the Bearer token.")
+    print("Leave blank if no authentication is needed.")
+    print()
+
+    token = input("API token (optional): ").strip() or None
+
+    # Validate the connection
+    print("\nTesting connection...")
+    headers = {"User-Agent": USER_AGENT}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        response = httpx.get(
+            f"{url}/api/documents/stats",
+            headers=headers,
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        stats = response.json()
+    except httpx.ConnectError:
+        print(f"\nCould not connect to {url}")
+        print("Check the URL and make sure the service is running.")
+        sys.exit(1)
+    except httpx.HTTPStatusError as e:
+        print(f"\nConnection failed: HTTP {e.response.status_code}")
+        if e.response.status_code == 401:
+            print("Authentication failed — check your API token.")
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        print(f"\nConnection failed: {e}")
+        sys.exit(1)
+
+    doc_count = stats.get("total_documents", stats.get("count", "?"))
+    update_doc_search(url, token)
+
+    print()
+    print(f"Connected! {doc_count} documents indexed.")
+    print("Document search tools are now available in Claude.")
     print()
 
 

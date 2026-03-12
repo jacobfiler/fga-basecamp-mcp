@@ -245,6 +245,18 @@ class BasecampClient:
                 break
         return all_ids
 
+    def _get_all_dock_ids(self, project: dict, tool_name: str) -> list[int]:
+        """Get all enabled dock tool IDs for a given tool name.
+
+        Some projects have multiple enabled tools of the same type (e.g. multiple
+        todosets). This returns all of them, not just the first/last.
+        """
+        return [
+            tool["id"]
+            for tool in project.get("dock", [])
+            if tool.get("enabled") and tool.get("name") == tool_name
+        ]
+
     def search_project(self, project_id: int, keywords: str) -> dict[str, list[dict]]:
         """Search across a project's messages, documents, uploads, and todos by keyword-matching titles.
 
@@ -266,20 +278,14 @@ class BasecampClient:
             title_lower = title.lower()
             return any(kw in title_lower for kw in kw_list)
 
-        # Get dock tool IDs
-        dock = {}
-        for tool in project.get("dock", []):
-            if tool.get("enabled"):
-                dock[tool["name"]] = tool["id"]
-
-        # Search messages
-        if mb_id := dock.get("message_board"):
+        # Search messages (across all message boards)
+        for mb_id in self._get_all_dock_ids(project, "message_board"):
             for m in self.list_messages(project_id, mb_id):
                 if matches(m.get("subject", "")):
                     results["messages"].append(m)
 
-        # Search vault (documents + uploads, 3 levels deep)
-        if vault_id := dock.get("vault"):
+        # Search vault (documents + uploads, 3 levels deep, across all vaults)
+        for vault_id in self._get_all_dock_ids(project, "vault"):
             vault_ids = self.crawl_vault_ids(project_id, vault_id)
             for vid in vault_ids:
                 for d in self.list_documents(project_id, vid):
@@ -289,8 +295,8 @@ class BasecampClient:
                     if matches(u.get("title", "") + " " + u.get("filename", "")):
                         results["uploads"].append(u)
 
-        # Search todos
-        if todoset_id := dock.get("todoset"):
+        # Search todos (across all todosets)
+        for todoset_id in self._get_all_dock_ids(project, "todoset"):
             for tl in self.list_todolists(project_id, todoset_id):
                 if matches(tl.get("name", tl.get("title", ""))):
                     results["todos"].append(tl)
@@ -303,6 +309,44 @@ class BasecampClient:
             results[key] = results[key][:30]
 
         return results
+
+    def close(self) -> None:
+        if self._http:
+            try:
+                self._http.close()
+            except Exception:
+                pass
+
+
+class DocSearchClient:
+    """Lightweight client for an external document search API."""
+
+    def __init__(self, url: str, token: str | None = None):
+        self.base_url = url.rstrip("/")
+        self._token = token
+        self._http: httpx.Client | None = None
+
+    def _client(self) -> httpx.Client:
+        if self._http is None or self._http.is_closed:
+            headers = {"User-Agent": USER_AGENT}
+            if self._token:
+                headers["Authorization"] = f"Bearer {self._token}"
+            self._http = httpx.Client(
+                headers=headers,
+                timeout=30.0,
+                transport=httpx.HTTPTransport(retries=2),
+            )
+        return self._http
+
+    def get(self, path: str, params: dict | None = None) -> dict:
+        """GET an endpoint. Returns parsed JSON or {"error": ...} on failure."""
+        try:
+            response = self._client().get(f"{self.base_url}{path}", params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Document search request failed: {e}")
+            return {"error": f"Document search request failed: {e}"}
 
     def close(self) -> None:
         if self._http:

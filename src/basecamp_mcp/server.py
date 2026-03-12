@@ -5,7 +5,7 @@ import sys
 
 from mcp.server.fastmcp import FastMCP
 
-from .client import BasecampClient
+from .client import BasecampClient, DocSearchClient
 from .config import load_config
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,8 @@ mcp = FastMCP(
 
 # Initialized lazily on first tool call
 _client: BasecampClient | None = None
+_doc_client: DocSearchClient | None = None
+_doc_client_checked = False
 
 
 def _get_client() -> BasecampClient:
@@ -27,6 +29,30 @@ def _get_client() -> BasecampClient:
             raise RuntimeError("Not configured. Run `basecamp-mcp auth` first.")
         _client = BasecampClient(config)
     return _client
+
+
+def _get_doc_client() -> DocSearchClient | None:
+    """Return the doc search client, or None if not configured."""
+    global _doc_client, _doc_client_checked
+    if not _doc_client_checked:
+        _doc_client_checked = True
+        config = load_config()
+        if config and config.get("doc_search_url"):
+            _doc_client = DocSearchClient(
+                config["doc_search_url"], config.get("doc_search_token")
+            )
+            logger.info(f"Document search enabled: {config['doc_search_url']}")
+    return _doc_client
+
+
+def _doc_search_request(path: str, params: dict | None = None) -> dict:
+    """Make a GET request to the document search API."""
+    client = _get_doc_client()
+    if not client:
+        return {
+            "error": "Document search not configured. Run `basecamp-mcp connect-docs`."
+        }
+    return client.get(path, params)
 
 
 def _summarize_project(p: dict) -> dict:
@@ -430,12 +456,75 @@ def search_all_projects(keywords: str) -> dict[str, list[dict]]:
     return combined
 
 
+# ── Document Search Tools (optional) ─────────────────────────
+
+
+@mcp.tool()
+def search_document_content(
+    query: str,
+    project_id: int | None = None,
+    limit: int = 10,
+) -> dict | str:
+    """Full-text search inside ingested documents (e.g. .docx files from Basecamp).
+
+    This searches the actual content of documents, not just titles. Requires
+    a connected document search API (set up via `basecamp-mcp connect-docs`).
+
+    Use this when you need to find information *within* documents rather than
+    just locating documents by name.
+
+    Results include `recording_id` and/or `upload_id` plus `project_id` which
+    can be used to link directly to the source in Basecamp:
+    - Comment attachments: https://3.basecamp.com/{account_id}/buckets/{project_id}/recordings/{recording_id}
+    - Vault uploads: https://3.basecamp.com/{account_id}/buckets/{project_id}/uploads/{upload_id}
+
+    Always include these Basecamp links when presenting results to the user.
+
+    Args:
+        query: Natural language search query (e.g. "SAVE Act voting requirements")
+        project_id: Optional Basecamp project ID to filter results
+        limit: Maximum number of results (1-50, default 10)
+    """
+    params: dict = {"q": query, "limit": min(max(limit, 1), 50)}
+    if project_id:
+        params["project_id"] = project_id
+
+    result = _doc_search_request("/api/documents/search", params)
+    if "error" in result:
+        return result["error"]
+
+    return {
+        "query": result.get("query", query),
+        "count": result.get("count", 0),
+        "results": result.get("results", []),
+    }
+
+
+@mcp.tool()
+def document_stats() -> dict | str:
+    """Get statistics about the document search index.
+
+    Shows how many documents are indexed, storage breakdown by source type, etc.
+    Requires a connected document search API.
+    """
+    result = _doc_search_request("/api/documents/stats")
+    if "error" in result:
+        return result["error"]
+    return result
+
+
 def main():
-    """Entry point — handles both `auth` subcommand and MCP server."""
-    if len(sys.argv) > 1 and sys.argv[1] == "auth":
+    """Entry point — handles subcommands and MCP server."""
+    subcmd = sys.argv[1] if len(sys.argv) > 1 else None
+
+    if subcmd == "auth":
         from .auth import run_auth_flow
 
         run_auth_flow()
+    elif subcmd == "connect-docs":
+        from .auth import run_connect_docs
+
+        run_connect_docs()
     else:
         mcp.run(transport="stdio")
 

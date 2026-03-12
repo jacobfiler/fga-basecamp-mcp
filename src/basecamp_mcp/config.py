@@ -30,14 +30,30 @@ def save_config(config: dict) -> None:
     CONFIG_FILE.chmod(0o600)
 
 
-def update_tokens(access_token: str, refresh_token: str | None = None) -> None:
-    """Update tokens in existing config (called after refresh)."""
+def _update_config(updates: dict) -> None:
+    """Load config, merge updates, and save. No-op if config doesn't exist."""
     config = load_config()
     if not config:
-        logger.error("No config file to update tokens in")
+        logger.error("No config file to update")
         return
-    config["access_token"] = access_token
-    if refresh_token:
-        config["refresh_token"] = refresh_token
-    config["token_updated_at"] = datetime.now().isoformat()
+    config.update(updates)
     save_config(config)
+
+
+def update_tokens(access_token: str, refresh_token: str | None = None) -> None:
+    """Update tokens in existing config (called after refresh)."""
+    updates: dict = {
+        "access_token": access_token,
+        "token_updated_at": datetime.now().isoformat(),
+    }
+    if refresh_token is not None:
+        updates["refresh_token"] = refresh_token
+    _update_config(updates)
+
+
+def update_doc_search(url: str, token: str | None = None) -> None:
+    """Add or update document search API settings in existing config."""
+    updates: dict = {"doc_search_url": url.rstrip("/")}
+    if token is not None:
+        updates["doc_search_token"] = token
+    _update_config(updates)
