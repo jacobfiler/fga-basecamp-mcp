@@ -42,6 +42,8 @@ def load_config() -> dict | None:
 def save_config(config: dict) -> None:
     """Save config to ~/.config/basecamp-mcp/config.json."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":  # Unix-like systems
+        CONFIG_DIR.chmod(0o700)
     CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
     # Restrict permissions to owner only (no-op on Windows)
     if platform.system() != "Windows":

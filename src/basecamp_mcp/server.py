@@ -1,8 +1,10 @@
 """MCP server with Basecamp tools."""
 
+import atexit
 import logging
 import re
 import sys
+import time
 
 from mcp.server.fastmcp import FastMCP
 
@@ -20,6 +22,16 @@ mcp = FastMCP(
 _client: BasecampClient | None = None
 _UNSET = object()
 _doc_client: DocSearchClient | None | object = _UNSET
+
+
+def _cleanup():
+    if _client is not None:
+        _client.close()
+    if isinstance(_doc_client, DocSearchClient):
+        _doc_client.close()
+
+
+atexit.register(_cleanup)
 
 
 def _ensure_initialized() -> None:
@@ -466,12 +478,15 @@ def search_all_projects(keywords: str, max_results: int = 15) -> dict[str, list[
         "todos": [],
     }
 
-    for project in projects:
+    for i, project in enumerate(projects):
         # Stop early if all categories are full
         if all(len(combined[k]) >= cap for k in combined):
             break
 
-        raw = client.search_project(project["id"], keywords)
+        if i > 0:
+            time.sleep(0.5)  # Rate limit: Basecamp allows 50 req/10s
+
+        raw = client.search_project(project["id"], keywords, project=project)
         if "error" in raw:
             continue
         for key in combined:

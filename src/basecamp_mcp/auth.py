@@ -1,6 +1,7 @@
 """OAuth flow for Basecamp — browser-based authorization with local callback server."""
 
 import http.server
+import secrets
 import sys
 import urllib.parse
 import webbrowser
@@ -46,11 +47,14 @@ def run_auth_flow() -> None:
         print("Client Secret is required.")
         sys.exit(1)
 
+    state = secrets.token_urlsafe(32)
+
     auth_url = (
         f"{AUTH_BASE}/authorization/new"
         f"?type=web_server"
         f"&client_id={client_id}"
         f"&redirect_uri={urllib.parse.quote(REDIRECT_URI)}"
+        f"&state={state}"
     )
 
     # State to capture from callback
@@ -60,6 +64,15 @@ def run_auth_flow() -> None:
         def do_GET(self):
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
+
+            # Verify CSRF state parameter
+            returned_state = params.get("state", [None])[0]
+            if returned_state != state:
+                result["error"] = "State mismatch — possible CSRF attack"
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"Authorization failed: state mismatch.")
+                return
 
             if "code" not in params:
                 error = params.get("error", ["unknown"])[0]

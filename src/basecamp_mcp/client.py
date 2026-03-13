@@ -20,6 +20,7 @@ class BasecampClient:
         self._client_id = config.get("client_id", "")
         self._client_secret = config.get("client_secret", "")
         self._http: httpx.Client | None = None
+        self._project_cache: dict[int, dict] = {}
 
     @property
     def _headers(self) -> dict:
@@ -78,7 +79,7 @@ class BasecampClient:
             logger.info("Token refreshed successfully")
             return True
         except httpx.HTTPError as e:
-            logger.error(f"Token refresh failed: {e}")
+            logger.error("Token refresh failed: %s", type(e).__name__)
             return False
 
     def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
@@ -92,7 +93,7 @@ class BasecampClient:
 
         return response
 
-    def _get(self, path: str, **kwargs) -> dict | list | None:
+    def _get(self, path: str, **kwargs) -> dict | None:
         """GET a Basecamp API endpoint. Returns parsed JSON or None on error."""
         url = f"{self.base_url}{path}"
         try:
@@ -145,7 +146,12 @@ class BasecampClient:
         return self._paginate("/projects.json")
 
     def get_project(self, project_id: int) -> dict | None:
-        return self._get(f"/projects/{project_id}.json")
+        if project_id in self._project_cache:
+            return self._project_cache[project_id]
+        result = self._get(f"/projects/{project_id}.json")
+        if result:
+            self._project_cache[project_id] = result
+        return result
 
     def find_project_by_name(self, name: str) -> dict | None:
         """Find a project by name (case-insensitive, partial match)."""
@@ -287,13 +293,16 @@ class BasecampClient:
             if tool.get("enabled") and tool.get("name") == tool_name
         ]
 
-    def search_project(self, project_id: int, keywords: str) -> dict[str, list[dict]]:
+    def search_project(
+        self, project_id: int, keywords: str, project: dict | None = None
+    ) -> dict[str, list[dict]]:
         """Search across a project's messages, documents, uploads, and todos by keyword-matching titles.
 
         Uses the recordings index API for uploads/documents to search ALL vault
         levels (including orphaned vaults). Returns matching items grouped by type.
         """
-        project = self.get_project(project_id)
+        if project is None:
+            project = self.get_project(project_id)
         if not project:
             return {"error": "Project not found"}
 
