@@ -104,9 +104,19 @@ class BasecampClient:
             return None
 
     def _paginate(
-        self, path: str, max_pages: int = 10, params: dict | None = None
+        self,
+        path: str,
+        max_pages: int = 10,
+        params: dict | None = None,
+        min_page_size: int = 50,
     ) -> list[dict]:
-        """Paginate through a Basecamp list endpoint."""
+        """Paginate through a Basecamp list endpoint.
+
+        Args:
+            min_page_size: If a page returns fewer items than this, assume it's
+                the last page.  Set to 1 for endpoints with small page sizes
+                (e.g. the recordings index) so we paginate until truly empty.
+        """
         all_items: list[dict] = []
         url = f"{self.base_url}{path}"
         base_params = dict(params) if params else {}
@@ -121,7 +131,7 @@ class BasecampClient:
                 if not items:
                     break
                 all_items.extend(items)
-                if len(items) < 50:
+                if len(items) < min_page_size:
                     break
             except httpx.HTTPError as e:
                 logger.error(f"Pagination failed at page {page}: {e}")
@@ -245,6 +255,26 @@ class BasecampClient:
                 break
         return all_ids
 
+    def list_all_recordings(self, project_id: int, recording_type: str) -> list[dict]:
+        """List ALL recordings of a given type in a project.
+
+        Uses /projects/recordings.json?type=&bucket= which returns
+        items from every vault (including orphaned/parent-less vaults that
+        crawl_vault_ids misses). No depth limit.
+        """
+        return self._paginate(
+            "/projects/recordings.json",
+            max_pages=200,
+            params={"type": recording_type, "bucket": project_id},
+            min_page_size=1,
+        )
+
+    def list_all_uploads(self, project_id: int) -> list[dict]:
+        return self.list_all_recordings(project_id, "Upload")
+
+    def list_all_documents(self, project_id: int) -> list[dict]:
+        return self.list_all_recordings(project_id, "Document")
+
     def _get_all_dock_ids(self, project: dict, tool_name: str) -> list[int]:
         """Get all enabled dock tool IDs for a given tool name.
 
@@ -260,7 +290,8 @@ class BasecampClient:
     def search_project(self, project_id: int, keywords: str) -> dict[str, list[dict]]:
         """Search across a project's messages, documents, uploads, and todos by keyword-matching titles.
 
-        Crawls vault folders 3 levels deep. Returns matching items grouped by type.
+        Uses the recordings index API for uploads/documents to search ALL vault
+        levels (including orphaned vaults). Returns matching items grouped by type.
         """
         project = self.get_project(project_id)
         if not project:
@@ -284,16 +315,14 @@ class BasecampClient:
                 if matches(m.get("subject", "")):
                     results["messages"].append(m)
 
-        # Search vault (documents + uploads, 3 levels deep, across all vaults)
-        for vault_id in self._get_all_dock_ids(project, "vault"):
-            vault_ids = self.crawl_vault_ids(project_id, vault_id)
-            for vid in vault_ids:
-                for d in self.list_documents(project_id, vid):
-                    if matches(d.get("title", "")):
-                        results["documents"].append(d)
-                for u in self.list_uploads(project_id, vid):
-                    if matches(u.get("title", "") + " " + u.get("filename", "")):
-                        results["uploads"].append(u)
+        # Search ALL documents and uploads via recordings API — no depth limit,
+        # finds files in orphaned vaults too
+        for d in self.list_all_documents(project_id):
+            if matches(d.get("title", "")):
+                results["documents"].append(d)
+        for u in self.list_all_uploads(project_id):
+            if matches(u.get("title", "") + " " + u.get("filename", "")):
+                results["uploads"].append(u)
 
         # Search todos (across all todosets)
         for todoset_id in self._get_all_dock_ids(project, "todoset"):

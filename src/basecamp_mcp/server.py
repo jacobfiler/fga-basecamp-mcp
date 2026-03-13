@@ -420,8 +420,9 @@ def browse_vault(project_id: int, vault_id: int | None = None) -> dict | str:
 def search_project(project_id: int, keywords: str) -> dict[str, list[dict]] | str:
     """Search across a project's messages, documents, uploads, and todos.
 
-    Matches keywords against titles/subjects. Crawls vault folders 3 levels deep
-    to find documents and files in sub-folders. Returns up to 30 results per type.
+    Matches keywords against titles/subjects. Searches ALL uploads and documents
+    in the project (every vault, every nesting level — no depth limit). Returns
+    up to 30 results per type.
 
     This is the best tool for finding something when you don't know where it is.
 
