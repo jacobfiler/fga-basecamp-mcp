@@ -1,6 +1,6 @@
 [project]
 name = "basecamp-mcp"
-version = "0.2.2"
+version = "0.2.3"
 description = "Basecamp MCP server for Claude — read and search Basecamp with your own API access"
 readme = "README.md"
 requires-python = ">=3.11"
