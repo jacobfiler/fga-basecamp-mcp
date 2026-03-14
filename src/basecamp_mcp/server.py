@@ -429,7 +429,11 @@ def browse_vault(project_id: int, vault_id: int | None = None) -> dict | str:
 
 
 @mcp.tool()
-def search_project(project_id: int, keywords: str) -> dict[str, list[dict]] | str:
+def search_project(
+    project_id: int,
+    keywords: str,
+    match_all: bool = True,
+) -> dict[str, list[dict]] | str:
     """Search across a project's messages, documents, uploads, and todos.
 
     Matches keywords against titles/subjects. Searches ALL uploads and documents
@@ -441,9 +445,10 @@ def search_project(project_id: int, keywords: str) -> dict[str, list[dict]] | st
     Args:
         project_id: The project ID to search
         keywords: Space-separated keywords to match (e.g. "style guide" or "brand colors")
+        match_all: If True (default), ALL keywords must match (AND). If False, ANY keyword matches (OR).
     """
     client = _get_client()
-    raw = client.search_project(project_id, keywords)
+    raw = client.search_project(project_id, keywords, match_all=match_all)
 
     if "error" in raw:
         return raw["error"]

@@ -1,14 +1,19 @@
 """Basecamp API client with automatic token refresh."""
 
 import logging
+import time
+from datetime import datetime
 
 import httpx
 
 from . import USER_AGENT
-from .config import update_tokens
+from .config import load_config, update_tokens
 
 logger = logging.getLogger(__name__)
 TOKEN_URL = "https://launchpad.37signals.com/authorization/token"
+
+# Access tokens expire every 2 weeks; refresh proactively after 13 days
+TOKEN_MAX_AGE_SECONDS = 13 * 24 * 3600
 
 
 class BasecampClient:
@@ -21,6 +26,9 @@ class BasecampClient:
         self._client_secret = config.get("client_secret", "")
         self._http: httpx.Client | None = None
         self._project_cache: dict[int, dict] = {}
+        self._project_list_cache: list[dict] | None = None
+        self._project_list_ts: float = 0
+        self._token_updated_at: str = config.get("token_updated_at", "")
 
     @property
     def _headers(self) -> dict:
@@ -61,6 +69,7 @@ class BasecampClient:
             data = response.json()
 
             self._access_token = data["access_token"]
+            self._token_updated_at = datetime.now().isoformat()
             new_refresh = data.get("refresh_token")
             if new_refresh:
                 self._refresh_token = new_refresh
@@ -82,8 +91,24 @@ class BasecampClient:
             logger.error("Token refresh failed: %s", type(e).__name__)
             return False
 
+    def _token_is_stale(self) -> bool:
+        """Check if the access token is likely expired based on age."""
+        if not self._token_updated_at:
+            return False
+        try:
+            updated = datetime.fromisoformat(self._token_updated_at)
+            age = (datetime.now() - updated).total_seconds()
+            return age > TOKEN_MAX_AGE_SECONDS
+        except (ValueError, TypeError):
+            return False
+
     def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
-        """Make a request with automatic 401 retry after token refresh."""
+        """Make a request with proactive + reactive token refresh."""
+        # Proactively refresh if token is likely expired
+        if self._token_is_stale():
+            logger.info("Token is stale, refreshing proactively")
+            self._refresh_access_token()
+
         client = self._client()
         response = client.request(method, url, **kwargs)
 
@@ -110,6 +135,7 @@ class BasecampClient:
         max_pages: int = 10,
         params: dict | None = None,
         min_page_size: int = 50,
+        max_items: int = 0,
     ) -> list[dict]:
         """Paginate through a Basecamp list endpoint.
 
@@ -117,6 +143,7 @@ class BasecampClient:
             min_page_size: If a page returns fewer items than this, assume it's
                 the last page.  Set to 1 for endpoints with small page sizes
                 (e.g. the recordings index) so we paginate until truly empty.
+            max_items: Stop after collecting this many items.  0 = unlimited.
         """
         all_items: list[dict] = []
         url = f"{self.base_url}{path}"
@@ -134,16 +161,27 @@ class BasecampClient:
                 all_items.extend(items)
                 if len(items) < min_page_size:
                     break
+                if max_items and len(all_items) >= max_items:
+                    break
             except httpx.HTTPError as e:
                 logger.error(f"Pagination failed at page {page}: {e}")
                 break
 
+        if max_items:
+            return all_items[:max_items]
         return all_items
 
     # ── Projects ──────────────────────────────────────────────────
 
-    def list_projects(self) -> list[dict]:
-        return self._paginate("/projects.json")
+    def list_projects(self, ttl: int = 300) -> list[dict]:
+        """List projects, returning a cached copy if fresh (default 5 min TTL)."""
+        now = time.monotonic()
+        if self._project_list_cache is not None and (now - self._project_list_ts) < ttl:
+            return self._project_list_cache
+        projects = self._paginate("/projects.json")
+        self._project_list_cache = projects
+        self._project_list_ts = now
+        return projects
 
     def get_project(self, project_id: int) -> dict | None:
         if project_id in self._project_cache:
@@ -294,12 +332,22 @@ class BasecampClient:
         ]
 
     def search_project(
-        self, project_id: int, keywords: str, project: dict | None = None
+        self,
+        project_id: int,
+        keywords: str,
+        project: dict | None = None,
+        match_all: bool = True,
+        max_per_type: int = 30,
     ) -> dict[str, list[dict]]:
         """Search across a project's messages, documents, uploads, and todos by keyword-matching titles.
 
         Uses the recordings index API for uploads/documents to search ALL vault
         levels (including orphaned vaults). Returns matching items grouped by type.
+
+        Args:
+            match_all: If True (default), ALL keywords must appear in the title
+                (AND mode). If False, ANY keyword match is sufficient (OR mode).
+            max_per_type: Maximum results per type (default 30).
         """
         if project is None:
             project = self.get_project(project_id)
@@ -314,12 +362,19 @@ class BasecampClient:
             "todos": [],
         }
 
-        def matches(title: str) -> bool:
-            title_lower = title.lower()
-            return any(kw in title_lower for kw in kw_list)
+        def matches(text: str) -> bool:
+            text_lower = text.lower()
+            if match_all:
+                return all(kw in text_lower for kw in kw_list)
+            return any(kw in text_lower for kw in kw_list)
+
+        def _full(key: str) -> bool:
+            return len(results[key]) >= max_per_type
 
         # Search messages (across all message boards)
         for mb_id in self._get_all_dock_ids(project, "message_board"):
+            if _full("messages"):
+                break
             for m in self.list_messages(project_id, mb_id):
                 if matches(m.get("subject", "")):
                     results["messages"].append(m)
@@ -327,24 +382,34 @@ class BasecampClient:
         # Search ALL documents and uploads via recordings API — no depth limit,
         # finds files in orphaned vaults too
         for d in self.list_all_documents(project_id):
+            if _full("documents"):
+                break
             if matches(d.get("title", "")):
                 results["documents"].append(d)
         for u in self.list_all_uploads(project_id):
+            if _full("uploads"):
+                break
             if matches(u.get("title", "") + " " + u.get("filename", "")):
                 results["uploads"].append(u)
 
         # Search todos (across all todosets)
         for todoset_id in self._get_all_dock_ids(project, "todoset"):
+            if _full("todos"):
+                break
             for tl in self.list_todolists(project_id, todoset_id):
                 if matches(tl.get("name", tl.get("title", ""))):
                     results["todos"].append(tl)
+                if _full("todos"):
+                    break
                 for t in self.list_todos(project_id, tl["id"]):
                     if matches(t.get("content", "")):
                         results["todos"].append(t)
+                    if _full("todos"):
+                        break
 
         # Cap results
         for key in results:
-            results[key] = results[key][:30]
+            results[key] = results[key][:max_per_type]
 
         return results
 
